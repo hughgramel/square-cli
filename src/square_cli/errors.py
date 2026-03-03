@@ -5,6 +5,7 @@ from __future__ import annotations
 import sys
 
 from rich.console import Console
+from square.core.api_error import ApiError
 
 console = Console(stderr=True)
 
@@ -30,36 +31,22 @@ class NotFoundError(SquareCLIError):
     pass
 
 
-class APIError(SquareCLIError):
-    """Square API returned an error."""
-
-    def __init__(self, message: str, errors: list[dict] | None = None, hint: str | None = None):
-        self.api_errors = errors or []
-        super().__init__(message, hint)
-
-
-def handle_api_result(result: object) -> dict:
-    """Process a Square API result, raising on errors.
-
-    The Square Python SDK returns result objects with .is_success(),
-    .body (dict), and .errors (list of error dicts).
-    """
-    if result.is_success():
-        return result.body
-
-    errors = result.errors or []
-    messages = []
-    for err in errors:
-        code = err.get("code", "UNKNOWN")
-        detail = err.get("detail", "No details provided")
-        field = err.get("field")
-        msg = f"{code}: {detail}"
-        if field:
-            msg += f" (field: {field})"
-        messages.append(msg)
-
-    error_text = "; ".join(messages) if messages else "Unknown API error"
-    raise APIError(error_text, errors=errors)
+def format_api_error(err: ApiError) -> str:
+    """Format a Square API error for display."""
+    if hasattr(err, 'body') and isinstance(err.body, dict):
+        errors = err.body.get("errors", [])
+        messages = []
+        for e in errors:
+            code = e.get("code", "UNKNOWN")
+            detail = e.get("detail", "No details provided")
+            field = e.get("field")
+            msg = f"{code}: {detail}"
+            if field:
+                msg += f" (field: {field})"
+            messages.append(msg)
+        if messages:
+            return "; ".join(messages)
+    return str(err)
 
 
 def print_error(message: str, hint: str | None = None) -> None:

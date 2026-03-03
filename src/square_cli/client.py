@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from square.client import Client
+from square.client import Square
+from square.environment import SquareEnvironment
 
 from . import config as cfg
-from .errors import AuthError, handle_api_result
+from .errors import AuthError
 
 
 def get_client(
@@ -15,7 +16,7 @@ def get_client(
     profile: str = "default",
     sandbox: bool = False,
     config_overrides: dict[str, Any] | None = None,
-) -> Client:
+) -> Square:
     """Create an authenticated Square client.
 
     Token resolution order:
@@ -34,16 +35,19 @@ def get_client(
     if config_overrides:
         profile_cfg.update(config_overrides)
 
-    environment = "sandbox" if sandbox else cfg.get_environment(profile_cfg)
+    env_str = "sandbox" if sandbox else cfg.get_environment(profile_cfg)
+    environment = (
+        SquareEnvironment.SANDBOX if env_str == "sandbox" else SquareEnvironment.PRODUCTION
+    )
 
-    return Client(
-        access_token=token,
+    return Square(
+        token=token,
         environment=environment,
     )
 
 
 def get_location_id(
-    client: Client,
+    client: Square,
     location_id: str | None = None,
     profile: str = "default",
 ) -> str:
@@ -63,12 +67,11 @@ def get_location_id(
         return configured
 
     # Try to auto-detect if there's only one location
-    result = client.locations.list_locations()
-    body = handle_api_result(result)
-    locations = body.get("locations", [])
+    locations_page = client.locations.list()
+    locations = locations_page.items or []
 
     if len(locations) == 1:
-        return locations[0]["id"]
+        return locations[0].id
 
     if len(locations) == 0:
         raise AuthError(
@@ -77,7 +80,7 @@ def get_location_id(
         )
 
     location_names = [
-        f'  {loc["id"]}: {loc.get("name", "Unnamed")}'
+        f"  {loc.id}: {loc.name or 'Unnamed'}"
         for loc in locations[:10]
     ]
     raise AuthError(

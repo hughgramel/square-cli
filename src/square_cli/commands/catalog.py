@@ -6,36 +6,41 @@ from typing import Annotated, Optional
 
 import typer
 from rich.console import Console
+from square.core.api_error import ApiError
 
 from ..client import get_client
-from ..errors import APIError, handle_api_result, exit_with_error
+from ..errors import exit_with_error, format_api_error, print_error
 from ..output import format_money, print_output, print_single
 
 app = typer.Typer(help="Manage catalog items, categories, taxes, discounts, and modifiers.")
 console = Console()
 
 
-def _format_catalog_item(obj: dict) -> dict:
-    """Flatten a Square catalog object for display."""
-    item_data = obj.get("item_data", {})
-    variations = item_data.get("variations", [])
+def _format_catalog_object(obj) -> dict:
+    """Flatten a Square CatalogObject for display."""
+    d = obj.model_dump() if hasattr(obj, "model_dump") else obj
+    obj_type = d.get("type", "")
+    item_data = d.get("item_data") or {}
+    category_data = d.get("category_data") or {}
+    variations = item_data.get("variations") or []
 
-    # Get price from first variation
     price_cents = None
     sku = None
     variation_id = None
     if variations:
         var = variations[0]
         variation_id = var.get("id")
-        var_data = var.get("item_variation_data", {})
+        var_data = var.get("item_variation_data") or {}
         sku = var_data.get("sku")
-        price_money = var_data.get("price_money", {})
+        price_money = var_data.get("price_money") or {}
         price_cents = price_money.get("amount")
 
+    name = item_data.get("name") or category_data.get("name") or ""
+
     return {
-        "id": obj.get("id", ""),
-        "type": obj.get("type", ""),
-        "name": item_data.get("name", obj.get("category_data", {}).get("name", "")),
+        "id": d.get("id", ""),
+        "type": obj_type,
+        "name": name,
         "description": item_data.get("description", ""),
         "sku": sku or "",
         "price": format_money(price_cents) if price_cents is not None else "",
@@ -43,7 +48,7 @@ def _format_catalog_item(obj: dict) -> dict:
         "variation_id": variation_id or "",
         "category_id": item_data.get("category_id", ""),
         "visibility": item_data.get("visibility", ""),
-        "updated_at": obj.get("updated_at", ""),
+        "updated_at": d.get("updated_at", ""),
     }
 
 
@@ -69,22 +74,21 @@ def list_catalog(
     sandbox: Annotated[bool, typer.Option("--sandbox", help="Use sandbox")] = False,
 ) -> None:
     """List all catalog items."""
-    client = get_client(access_token=access_token, profile=profile, sandbox=sandbox)
+    try:
+        client = get_client(access_token=access_token, profile=profile, sandbox=sandbox)
+    except Exception as e:
+        exit_with_error(str(e), hint=getattr(e, "hint", None))
 
     types = type or "ITEM"
-    cursor = None
-    all_objects: list[dict] = []
 
-    while True:
-        result = client.catalog.list_catalog(types=types, cursor=cursor)
-        body = handle_api_result(result)
-        objects = body.get("objects", [])
-        all_objects.extend(objects)
-        cursor = body.get("cursor")
-        if not cursor:
-            break
+    try:
+        all_objects = []
+        for page in client.catalog.list(types=types):
+            all_objects.append(page)
+    except ApiError as e:
+        exit_with_error(format_api_error(e))
 
-    items = [_format_catalog_item(obj) for obj in all_objects]
+    items = [_format_catalog_object(obj) for obj in all_objects]
     print_output(items, columns=CATALOG_COLUMNS, fmt=format, title=f"Catalog ({len(items)} items)")
 
 
@@ -97,23 +101,29 @@ def get_item(
     sandbox: Annotated[bool, typer.Option("--sandbox", help="Use sandbox")] = False,
 ) -> None:
     """Get details for a single catalog item."""
-    client = get_client(access_token=access_token, profile=profile, sandbox=sandbox)
+    try:
+        client = get_client(access_token=access_token, profile=profile, sandbox=sandbox)
+        response = client.catalog.object.get(object_id=object_id)
+    except ApiError as e:
+        exit_with_error(
+            format_api_error(e),
+            hint='Run "square catalog list" to see available items.',
+        )
+    except Exception as e:
+        exit_with_error(str(e), hint=getattr(e, "hint", None))
 
-    result = client.catalog.retrieve_catalog_object(object_id=object_id)
-    body = handle_api_result(result)
-    obj = body.get("object", {})
-
+    obj = response.object
     if format == "json":
-        print_single(obj, fmt="json")
+        data = obj.model_dump() if hasattr(obj, "model_dump") else obj
+        print_single(data, fmt="json")
     else:
-        item = _format_catalog_item(obj)
+        item = _format_catalog_object(obj)
         print_single(item, title=item.get("name", "Catalog Item"))
 
 
 @app.command("search")
 def search_catalog(
     query: Annotated[str, typer.Argument(help="Search text")],
-    category: Annotated[Optional[str], typer.Option("--category", help="Filter by category name")] = None,
     limit: Annotated[int, typer.Option("--limit", "-n", help="Max results")] = 100,
     format: Annotated[str, typer.Option("--format", "-f", help="Output: table, json, csv")] = "table",
     access_token: Annotated[Optional[str], typer.Option("--access-token", hidden=True)] = None,
@@ -121,23 +131,20 @@ def search_catalog(
     sandbox: Annotated[bool, typer.Option("--sandbox", help="Use sandbox")] = False,
 ) -> None:
     """Search catalog items by text query."""
-    client = get_client(access_token=access_token, profile=profile, sandbox=sandbox)
+    try:
+        client = get_client(access_token=access_token, profile=profile, sandbox=sandbox)
+        response = client.catalog.search(
+            object_types=["ITEM"],
+            query={"text_query": {"keywords": [query]}},
+            limit=min(limit, 100),
+        )
+    except ApiError as e:
+        exit_with_error(format_api_error(e))
+    except Exception as e:
+        exit_with_error(str(e), hint=getattr(e, "hint", None))
 
-    search_body: dict = {
-        "object_types": ["ITEM"],
-        "query": {
-            "text_query": {
-                "keywords": [query],
-            }
-        },
-        "limit": min(limit, 100),
-    }
-
-    result = client.catalog.search_catalog_objects(body=search_body)
-    body = handle_api_result(result)
-    objects = body.get("objects", [])
-
-    items = [_format_catalog_item(obj) for obj in objects]
+    objects = response.objects or []
+    items = [_format_catalog_object(obj) for obj in objects]
     print_output(
         items,
         columns=CATALOG_COLUMNS,
@@ -161,17 +168,18 @@ def create_item(
     """Create a new catalog item."""
     import uuid
 
-    client = get_client(access_token=access_token, profile=profile, sandbox=sandbox)
+    try:
+        client = get_client(access_token=access_token, profile=profile, sandbox=sandbox)
+    except Exception as e:
+        exit_with_error(str(e), hint=getattr(e, "hint", None))
+
     idempotency_key = str(uuid.uuid4())
 
     if type.upper() == "CATEGORY":
-        body = {
-            "idempotency_key": idempotency_key,
-            "object": {
-                "type": "CATEGORY",
-                "id": f"#new_category_{idempotency_key[:8]}",
-                "category_data": {"name": name},
-            },
+        obj_params = {
+            "type": "CATEGORY",
+            "id": f"#new_category_{idempotency_key[:8]}",
+            "category_data": {"name": name},
         }
     else:
         variation_data: dict = {
@@ -190,31 +198,36 @@ def create_item(
         if description:
             item_data["description"] = description
 
-        body = {
-            "idempotency_key": idempotency_key,
-            "object": {
-                "type": "ITEM",
-                "id": f"#new_item_{idempotency_key[:8]}",
-                "item_data": {
-                    **item_data,
-                    "variations": [
-                        {
-                            "type": "ITEM_VARIATION",
-                            "id": f"#new_var_{idempotency_key[:8]}",
-                            "item_variation_data": variation_data,
-                        }
-                    ],
-                },
+        obj_params = {
+            "type": "ITEM",
+            "id": f"#new_item_{idempotency_key[:8]}",
+            "item_data": {
+                **item_data,
+                "variations": [
+                    {
+                        "type": "ITEM_VARIATION",
+                        "id": f"#new_var_{idempotency_key[:8]}",
+                        "item_variation_data": variation_data,
+                    }
+                ],
             },
         }
 
-    result = client.catalog.upsert_catalog_object(body=body)
-    resp = handle_api_result(result)
-    obj = resp.get("catalog_object", {})
+    try:
+        response = client.catalog.object.upsert(
+            idempotency_key=idempotency_key,
+            object=obj_params,
+        )
+    except ApiError as e:
+        exit_with_error(format_api_error(e))
 
-    console.print(f'[green]Created:[/] {name} (ID: {obj.get("id", "?")})')
+    created = response.catalog_object
+    created_id = created.id if hasattr(created, "id") else "?"
+    console.print(f"[green]Created:[/] {name} (ID: {created_id})")
+
     if format == "json":
-        print_single(obj, fmt="json")
+        data = created.model_dump() if hasattr(created, "model_dump") else created
+        print_single(data, fmt="json")
 
 
 @app.command("update")
@@ -234,31 +247,35 @@ def update_item(
     if not any([name, price is not None, description, sku]):
         exit_with_error("No changes specified.", hint="Use --name, --price, --description, or --sku.")
 
-    client = get_client(access_token=access_token, profile=profile, sandbox=sandbox)
+    try:
+        client = get_client(access_token=access_token, profile=profile, sandbox=sandbox)
+        response = client.catalog.object.get(object_id=object_id)
+    except ApiError as e:
+        exit_with_error(format_api_error(e), hint='Run "square catalog list" to see available items.')
+    except Exception as e:
+        exit_with_error(str(e), hint=getattr(e, "hint", None))
 
-    # Fetch current object
-    result = client.catalog.retrieve_catalog_object(object_id=object_id)
-    body = handle_api_result(result)
-    obj = body["object"]
-    current = _format_catalog_item(obj)
+    obj = response.object
+    obj_dict = obj.model_dump() if hasattr(obj, "model_dump") else dict(obj)
+    current = _format_catalog_object(obj)
 
     changes: list[str] = []
-    item_data = obj.get("item_data", {})
-    variations = item_data.get("variations", [])
+    item_data = obj_dict.get("item_data") or {}
+    variations = item_data.get("variations") or []
 
     if name and name != item_data.get("name"):
         changes.append(f'  Name: "{item_data.get("name")}" -> "{name}"')
         item_data["name"] = name
 
     if description is not None and description != item_data.get("description", ""):
-        old_desc = item_data.get("description", "(none)")
+        old_desc = item_data.get("description") or "(none)"
         changes.append(f'  Description: "{old_desc}" -> "{description}"')
         item_data["description"] = description
 
     if variations:
-        var_data = variations[0].get("item_variation_data", {})
+        var_data = variations[0].get("item_variation_data") or {}
         if price is not None:
-            old_price = var_data.get("price_money", {}).get("amount")
+            old_price = (var_data.get("price_money") or {}).get("amount")
             new_price_cents = int(price * 100)
             if old_price != new_price_cents:
                 changes.append(f"  Price: {format_money(old_price)} -> {format_money(new_price_cents)}")
@@ -282,13 +299,14 @@ def update_item(
 
     import uuid
 
-    result = client.catalog.upsert_catalog_object(
-        body={
-            "idempotency_key": str(uuid.uuid4()),
-            "object": obj,
-        }
-    )
-    handle_api_result(result)
+    try:
+        client.catalog.object.upsert(
+            idempotency_key=str(uuid.uuid4()),
+            object=obj_dict,
+        )
+    except ApiError as e:
+        exit_with_error(format_api_error(e))
+
     console.print("\n[green]Updated successfully.[/]")
 
 
@@ -301,24 +319,29 @@ def delete_item(
     sandbox: Annotated[bool, typer.Option("--sandbox", help="Use sandbox")] = False,
 ) -> None:
     """Delete a catalog item."""
-    client = get_client(access_token=access_token, profile=profile, sandbox=sandbox)
+    try:
+        client = get_client(access_token=access_token, profile=profile, sandbox=sandbox)
+        response = client.catalog.object.get(object_id=object_id)
+    except ApiError as e:
+        exit_with_error(format_api_error(e), hint='Run "square catalog list" to see available items.')
+    except Exception as e:
+        exit_with_error(str(e), hint=getattr(e, "hint", None))
 
-    # Fetch the item name for confirmation
-    result = client.catalog.retrieve_catalog_object(object_id=object_id)
-    body = handle_api_result(result)
-    obj = body["object"]
-    item = _format_catalog_item(obj)
-    name = item.get("name", object_id)
+    item = _format_catalog_object(response.object)
+    item_name = item.get("name", object_id)
 
     if not confirm:
-        confirmed = typer.confirm(f'Delete "{name}" ({object_id})?')
+        confirmed = typer.confirm(f'Delete "{item_name}" ({object_id})?')
         if not confirmed:
             console.print("[dim]Cancelled.[/]")
             raise typer.Exit()
 
-    result = client.catalog.delete_catalog_object(object_id=object_id)
-    handle_api_result(result)
-    console.print(f'[green]Deleted:[/] {name} ({object_id})')
+    try:
+        client.catalog.object.delete(object_id=object_id)
+    except ApiError as e:
+        exit_with_error(format_api_error(e))
+
+    console.print(f"[green]Deleted:[/] {item_name} ({object_id})")
 
 
 @app.command("export")
@@ -334,20 +357,19 @@ def export_catalog(
     import json as json_module
     from pathlib import Path
 
-    client = get_client(access_token=access_token, profile=profile, sandbox=sandbox)
+    try:
+        client = get_client(access_token=access_token, profile=profile, sandbox=sandbox)
+    except Exception as e:
+        exit_with_error(str(e), hint=getattr(e, "hint", None))
 
-    cursor = None
-    all_objects: list[dict] = []
+    all_objects = []
     console.print(f"Fetching catalog ({type})...", end=" ")
 
-    while True:
-        result = client.catalog.list_catalog(types=type, cursor=cursor)
-        body = handle_api_result(result)
-        objects = body.get("objects", [])
-        all_objects.extend(objects)
-        cursor = body.get("cursor")
-        if not cursor:
-            break
+    try:
+        for obj in client.catalog.list(types=type):
+            all_objects.append(obj)
+    except ApiError as e:
+        exit_with_error(format_api_error(e))
 
     console.print(f"[green]{len(all_objects)} objects.[/]")
 
@@ -355,15 +377,19 @@ def export_catalog(
     if format == "csv":
         import csv
 
-        items = [_format_catalog_item(obj) for obj in all_objects]
+        items = [_format_catalog_object(obj) for obj in all_objects]
         with open(path, "w", newline="") as f:
             if items:
                 writer = csv.DictWriter(f, fieldnames=items[0].keys())
                 writer.writeheader()
                 writer.writerows(items)
     else:
+        data = [
+            obj.model_dump() if hasattr(obj, "model_dump") else obj
+            for obj in all_objects
+        ]
         with open(path, "w") as f:
-            json_module.dump(all_objects, f, indent=2, default=str)
+            json_module.dump(data, f, indent=2, default=str)
 
     size = path.stat().st_size
     console.print(f"Saved to {path} ({size / 1024:.1f} KB)")
