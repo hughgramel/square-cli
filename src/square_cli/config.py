@@ -30,6 +30,13 @@ DEFAULTS: dict[str, Any] = {
 KEYRING_SERVICE = "square-cli"
 
 
+def resolve_profile(profile: str, sandbox: bool = False) -> str:
+    """Return the effective profile name, appending '-sandbox' for sandbox mode."""
+    if sandbox and not profile.endswith("-sandbox"):
+        return f"{profile}-sandbox"
+    return profile
+
+
 def config_dir() -> Path:
     """Return the config directory, creating it if needed."""
     d = Path(os.environ.get("SQUARE_CONFIG_DIR", str(DEFAULT_CONFIG_DIR)))

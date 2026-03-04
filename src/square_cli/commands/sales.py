@@ -97,7 +97,7 @@ def sales_summary(
 
     try:
         client = get_client(access_token=access_token, profile=profile, sandbox=sandbox)
-        loc_id = get_location_id(client, location_id, profile)
+        loc_id = get_location_id(client, location_id, profile, sandbox=sandbox)
     except Exception as e:
         exit_with_error(str(e), hint=getattr(e, "hint", None))
 

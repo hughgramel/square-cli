@@ -100,9 +100,11 @@ def login(
     Returns:
         Dict with merchant_id, access_token expiry info, etc.
     """
+    effective_profile = cfg.resolve_profile(profile, sandbox)
+
     # Check if already authenticated via env var
     env_token = os.environ.get("SQUARE_ACCESS_TOKEN")
-    if env_token:
+    if env_token and not sandbox:
         console.print("[bold green]Already authenticated[/] via SQUARE_ACCESS_TOKEN env var.")
         console.print(
             "[dim]Tip: To store the token in your OS keychain instead, run:\n"
@@ -111,20 +113,20 @@ def login(
         return {
             "merchant_id": "unknown",
             "expires_at": None,
-            "environment": "sandbox" if sandbox else "production",
+            "environment": "production",
             "profile": profile,
         }
 
     # Check if already authenticated via keychain
-    existing_token = cfg.get_access_token(profile)
+    existing_token = cfg.get_access_token(effective_profile)
     if existing_token and not getattr(login, "_force_token", False):
-        console.print(f"[bold green]Already authenticated[/] (profile: {profile}).")
+        console.print(f"[bold green]Already authenticated[/] (profile: {effective_profile}).")
         console.print('[dim]Run "square logout" first to re-authenticate.[/]')
         return {
-            "merchant_id": cfg.load_config(profile=profile).get("merchant_id", "unknown"),
+            "merchant_id": cfg.load_config(profile=effective_profile).get("merchant_id", "unknown"),
             "expires_at": None,
             "environment": "sandbox" if sandbox else "production",
-            "profile": profile,
+            "profile": effective_profile,
         }
 
     client_id = get_client_id()
@@ -289,10 +291,13 @@ def _login_with_token_prompt(
     sandbox: bool = False,
 ) -> dict[str, Any]:
     """Prompt the user to paste an access token and store it in the keychain."""
+    effective_profile = cfg.resolve_profile(profile, sandbox)
+    env = "sandbox" if sandbox else "production"
+
     console.print(
-        "[bold]No OAuth app configured.[/] You can paste an access token instead.\n"
-        "Get one from [link=https://developer.squareup.com/apps]https://developer.squareup.com/apps[/link]\n"
-        "  → Open your app → Credentials → Copy the Access token\n"
+        f"[bold]No OAuth app configured.[/] You can paste an access token instead.\n"
+        f"Get one from [link=https://developer.squareup.com/apps]https://developer.squareup.com/apps[/link]\n"
+        f"  → Open your app → Credentials → {'Sandbox' if sandbox else 'Production'} tab → Copy the Access token\n"
     )
 
     token = console.input("[bold]Paste your access token:[/] ").strip()
@@ -301,7 +306,6 @@ def _login_with_token_prompt(
         raise SystemExit(1)
 
     # Validate the token by calling the merchants endpoint
-    env = "sandbox" if sandbox else "production"
     base_url = "https://connect.squareupsandbox.com" if sandbox else "https://connect.squareup.com"
     console.print("Verifying token...", end=" ")
 
@@ -323,15 +327,15 @@ def _login_with_token_prompt(
 
     console.print("[green]Valid![/]")
 
-    # Store in keychain
-    cfg.save_access_token(token, profile=profile)
-    cfg.save_config({"environment": env, "merchant_id": merchant_id}, profile=profile)
+    # Store in keychain under the effective profile
+    cfg.save_access_token(token, profile=effective_profile)
+    cfg.save_config({"environment": env, "merchant_id": merchant_id}, profile=effective_profile)
 
     return {
         "merchant_id": merchant_id,
         "expires_at": None,
         "environment": env,
-        "profile": profile,
+        "profile": effective_profile,
     }
 
 
