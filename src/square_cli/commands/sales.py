@@ -22,35 +22,44 @@ def _fetch_completed_orders(client, location_id: str, start_at: str, end_at: str
     """Fetch all completed orders in a date range."""
     all_orders = []
     cursor = None
+    seen_cursors: set[str] = set()
 
     while True:
-        query = {
-            "date_time_filter": {
-                "closed_at": {
-                    "start_at": start_at,
-                    "end_at": end_at,
-                }
-            },
-            "state_filter": {"states": ["COMPLETED"]},
-        }
-
-        kwargs = {
+        body: dict = {
             "location_ids": [location_id],
-            "query": query,
+            "query": {
+                "filter": {
+                    "date_time_filter": {
+                        "closed_at": {
+                            "start_at": start_at,
+                            "end_at": end_at,
+                        }
+                    },
+                    "state_filter": {"states": ["COMPLETED"]},
+                },
+                "sort": {
+                    "sort_field": "CLOSED_AT",
+                    "sort_order": "DESC",
+                },
+            },
             "limit": 500,
         }
         if cursor:
-            kwargs["cursor"] = cursor
+            body["cursor"] = cursor
 
-        response = client.orders.search(**kwargs)
+        response = client.orders.search(**body)
         orders = response.orders or []
         for o in orders:
             d = o.model_dump() if hasattr(o, "model_dump") else o
             all_orders.append(d)
 
-        cursor = response.cursor if hasattr(response, "cursor") else None
+        cursor = getattr(response, "cursor", None) or None
         if not cursor or not orders:
             break
+        # Safety: detect repeated cursors to prevent infinite loops
+        if cursor in seen_cursors:
+            break
+        seen_cursors.add(cursor)
 
     return all_orders
 

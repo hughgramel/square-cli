@@ -18,9 +18,13 @@ console = Console()
 def login(
     sandbox: Annotated[bool, typer.Option("--sandbox", help="Authenticate against sandbox")] = False,
     profile: Annotated[str, typer.Option("--profile", "-p", help="Profile name")] = "default",
+    token: Annotated[bool, typer.Option("--token", help="Authenticate by pasting an access token")] = False,
 ) -> None:
-    """Authenticate with Square via OAuth browser flow."""
-    result = auth_module.login(profile=profile, sandbox=sandbox)
+    """Authenticate with Square via OAuth or access token."""
+    if token:
+        result = auth_module._login_with_token_prompt(profile=profile, sandbox=sandbox)
+    else:
+        result = auth_module.login(profile=profile, sandbox=sandbox)
 
     merchant = result.get("merchant_id", "Unknown")
     env = result.get("environment", "production")
